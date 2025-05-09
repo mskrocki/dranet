@@ -13,17 +13,14 @@
 # limitations under the License.
 
 # setup cross-compile env
-FROM --platform=$BUILDPLATFORM golang:1.24 AS builder
-ARG TARGETARCH
-ARG GOARCH=${TARGETARCH} CGO_ENABLED=0
+FROM  golang:1.24 AS builder
+ARG GOARCH=amd64 CGO_ENABLED=0
 
 # cache go modules
 WORKDIR /go/src/app
-COPY go.mod go.sum .
-RUN go mod download
-
 # build
 COPY . .
+RUN go mod download
 RUN go build -o /go/bin/dranet ./cmd/dranet
 
 # copy binary onto base image
