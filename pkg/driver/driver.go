@@ -24,13 +24,12 @@ import (
 	"slices"
 	"time"
 
-	"github.com/google/cel-go/cel"
-	"github.com/google/dranet/pkg/filter"
-	"github.com/google/dranet/pkg/inventory"
-
 	"github.com/Mellanox/rdmamap"
 	"github.com/containerd/nri/pkg/api"
 	"github.com/containerd/nri/pkg/stub"
+	"github.com/google/cel-go/cel"
+	"github.com/google/dranet/pkg/filter"
+	"github.com/google/dranet/pkg/inventory"
 
 	resourcev1beta1 "k8s.io/api/resource/v1beta1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -232,9 +231,15 @@ func (np *NetworkDriver) RunPodSandbox(ctx context.Context, pod *api.PodSandbox)
 		if claim.Status.Allocation == nil {
 			continue
 		}
+		var devivcesStatus []resourcev1beta1.AllocatedDeviceStatus
 		for _, result := range claim.Status.Allocation.Devices.Results {
 			if result.Driver != np.driverName {
 				continue
+			}
+			devState := resourcev1beta1.AllocatedDeviceStatus{
+				Driver: result.Driver,
+				Pool:   result.Pool,
+				Device: result.Device,
 			}
 
 			// Process the configurations of the ResourceClaim
@@ -262,11 +267,19 @@ func (np *NetworkDriver) RunPodSandbox(ctx context.Context, pod *api.PodSandbox)
 
 			// TODO config options to rename the device and pass parameters
 			// use https://github.com/opencontainers/runtime-spec/pull/1271
-			err := nsAttachNetdev(result.Device, ns, result.Device)
+			ifcData, err := nsAttachNetdev(result.Device, ns, result.Device)
 			if err != nil {
 				klog.Infof("RunPodSandbox error moving device %s to namespace %s: %v", result.Device, ns, err)
 				return err
 			}
+			devState.NetworkData = ifcData
+			devivcesStatus = append(devivcesStatus, devState)
+		}
+		claim.Status.Devices = devivcesStatus
+		_, err := np.kubeClient.ResourceV1beta1().ResourceClaims(claim.Namespace).UpdateStatus(ctx, claim, metav1.UpdateOptions{})
+		if err != nil {
+			klog.Infof("RunPodSandbox error updating claim %s/%s : %v", claim.Namespace, claim.Name, err)
+			return err
 		}
 	}
 	return nil
