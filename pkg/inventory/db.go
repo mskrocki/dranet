@@ -26,6 +26,7 @@ import (
 
 	"github.com/Mellanox/rdmamap"
 	"github.com/google/dranet/pkg/cloudprovider"
+	"github.com/google/dranet/pkg/podnet"
 	"github.com/vishvananda/netlink"
 	"github.com/vishvananda/netns"
 	"golang.org/x/time/rate"
@@ -57,6 +58,9 @@ type DB struct {
 
 	rateLimiter   *rate.Limiter
 	notifications chan []resourceapi.Device
+
+	podNetworks map[string]*podnet.DranetData
+	lock        *sync.Mutex
 }
 
 type Device struct {
@@ -64,11 +68,14 @@ type Device struct {
 	Name string
 }
 
-func New() *DB {
+func New(lock *sync.Mutex, podNetworksMap map[string]*podnet.DranetData) *DB {
 	return &DB{
 		rateLimiter:   rate.NewLimiter(rate.Every(minInterval), 1),
 		podStore:      map[int]string{},
 		notifications: make(chan []resourceapi.Device),
+
+		lock:        lock,
+		podNetworks: podNetworksMap,
 	}
 }
 
@@ -222,6 +229,15 @@ func (db *DB) netdevToDRAdev(ifName string) (*resourceapi.Device, error) {
 	}
 	linkType := link.Type()
 	linkAttrs := link.Attrs()
+
+	db.lock.Lock()
+	defer db.lock.Unlock()
+	for k, v := range db.podNetworks {
+		if v.Name == ifName {
+			device.Basic.Attributes["dra.net/podNetwork"] = resourceapi.DeviceAttribute{StringValue: &k}
+			break
+		}
+	}
 
 	// identify the namespace holding the link as the other end of a veth pair
 	netnsid := link.Attrs().NetNsID

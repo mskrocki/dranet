@@ -2,15 +2,16 @@ package main
 
 import (
 	"context"
+	"sync"
 	"time"
 
-	podnetworkcontroller "github.com/google/dranet/pkg/podnet"
+	"github.com/google/dranet/pkg/podnet"
 	"k8s.io/client-go/rest"
 	podnetworkclientset "sigs.k8s.io/multi-network-api/pkg/client/clientset/versioned"
 	podnetworkfactory "sigs.k8s.io/multi-network-api/pkg/client/informers/externalversions"
 )
 
-func startPodNetworkController(ctx context.Context, kubeConfig *rest.Config) error {
+func startPodNetworkController(ctx context.Context, kubeConfig *rest.Config, lock *sync.Mutex, dranetDataMap map[string]*podnet.DranetData) error {
 	networkClient, err := podnetworkclientset.NewForConfig(kubeConfig)
 	if err != nil {
 		return err
@@ -18,10 +19,12 @@ func startPodNetworkController(ctx context.Context, kubeConfig *rest.Config) err
 	nwInfFactory := podnetworkfactory.NewSharedInformerFactory(networkClient, 0*time.Second)
 	nwInformer := nwInfFactory.Multinetwork().V1alpha1().PodNetworks()
 
-	podNetworkController := podnetworkcontroller.NewPodNetworkController(
+	podNetworkController := podnet.NewPodNetworkController(
 		nwInformer,
 		networkClient,
 		nwInfFactory,
+		lock,
+		dranetDataMap,
 	)
 
 	go podNetworkController.Run(1, ctx.Done())

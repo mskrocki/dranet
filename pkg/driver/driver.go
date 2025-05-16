@@ -18,10 +18,12 @@ package driver
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
+	"sync"
 	"time"
 
 	"github.com/Mellanox/rdmamap"
@@ -30,6 +32,8 @@ import (
 	"github.com/google/cel-go/cel"
 	"github.com/google/dranet/pkg/filter"
 	"github.com/google/dranet/pkg/inventory"
+	"github.com/google/dranet/pkg/podnet"
+	"k8s.io/apimachinery/pkg/runtime"
 
 	resourcev1beta1 "k8s.io/api/resource/v1beta1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -78,6 +82,10 @@ func WithFilter(filter cel.Program) Option {
 
 var _ drapb.DRAPluginServer = &NetworkDriver{}
 
+type podStatus struct {
+	PodNetwork string `json:"podNetwork"`
+}
+
 type NetworkDriver struct {
 	driverName string
 	kubeClient kubernetes.Interface
@@ -89,11 +97,12 @@ type NetworkDriver struct {
 	netdb *inventory.DB
 	// options
 	celProgram cel.Program
+	localdb    map[string]resourcev1beta1.Device
 }
 
 type Option func(*NetworkDriver)
 
-func Start(ctx context.Context, driverName string, kubeClient kubernetes.Interface, nodeName string, opts ...Option) (*NetworkDriver, error) {
+func Start(ctx context.Context, driverName string, kubeClient kubernetes.Interface, nodeName string, lock *sync.Mutex, podNetworks map[string]*podnet.DranetData, opts ...Option) (*NetworkDriver, error) {
 	store := cache.NewIndexer(cache.MetaNamespaceKeyFunc,
 		cache.Indexers{
 			cache.NamespaceIndex: cache.MetaNamespaceIndexFunc,
@@ -104,6 +113,7 @@ func Start(ctx context.Context, driverName string, kubeClient kubernetes.Interfa
 		driverName:       driverName,
 		kubeClient:       kubeClient,
 		claimAllocations: store,
+		localdb:          make(map[string]resourcev1beta1.Device),
 	}
 
 	for _, o := range opts {
@@ -162,7 +172,7 @@ func Start(ctx context.Context, driverName string, kubeClient kubernetes.Interfa
 	}()
 
 	// register the host network interfaces
-	plugin.netdb = inventory.New()
+	plugin.netdb = inventory.New(lock, podNetworks)
 	go func() {
 		err = plugin.netdb.Run(ctx)
 		if err != nil {
@@ -272,6 +282,22 @@ func (np *NetworkDriver) RunPodSandbox(ctx context.Context, pod *api.PodSandbox)
 				klog.Infof("RunPodSandbox error moving device %s to namespace %s: %v", result.Device, ns, err)
 				return err
 			}
+
+			if device, ok := np.localdb[result.Device]; ok {
+				if podNet, ok := device.Basic.Attributes["dra.net/podNetwork"]; ok {
+					data, err := json.Marshal(&podStatus{
+						PodNetwork: *podNet.StringValue,
+					})
+					if err != nil {
+						klog.Infof("RunPodSandbox error marshaling device %s data status: %v", result.Device, err)
+						return err
+					}
+					devState.Data = runtime.RawExtension{Raw: data}
+				}
+			} else {
+				klog.Warningf("Device %s not found in local DB", result.Device)
+			}
+
 			devState.NetworkData = ifcData
 			devivcesStatus = append(devivcesStatus, devState)
 		}
@@ -356,6 +382,7 @@ func (np *NetworkDriver) PublishResources(ctx context.Context) {
 		select {
 		case devices := <-np.netdb.GetResources(ctx):
 			klog.V(4).Infof("Received %d devices", len(devices))
+			np.updateLocalDB(devices)
 			devices = filter.FilterDevices(np.celProgram, devices)
 			resources := kubeletplugin.Resources{
 				Devices: devices,
@@ -370,6 +397,12 @@ func (np *NetworkDriver) PublishResources(ctx context.Context) {
 		}
 		// poor man rate limit
 		time.Sleep(3 * time.Second)
+	}
+}
+
+func (np *NetworkDriver) updateLocalDB(devices []resourcev1beta1.Device) {
+	for _, device := range devices {
+		np.localdb[device.Name] = device
 	}
 }
 

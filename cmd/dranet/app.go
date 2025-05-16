@@ -25,12 +25,13 @@ import (
 	"os/signal"
 	"reflect"
 	"runtime/debug"
+	"sync"
 	"sync/atomic"
 
 	"github.com/google/cel-go/cel"
 	"github.com/google/cel-go/ext"
 	"github.com/google/dranet/pkg/driver"
-
+	"github.com/google/dranet/pkg/podnet"
 	"golang.org/x/sys/unix"
 
 	resourcev1beta1 "k8s.io/api/resource/v1beta1"
@@ -89,6 +90,9 @@ func main() {
 
 	var config *rest.Config
 	var err error
+	var lock sync.Mutex
+	dranetDataMap := make(map[string]*podnet.DranetData, 0)
+
 	if kubeconfig != "" {
 		config, err = clientcmd.BuildConfigFromFlags("", kubeconfig)
 	} else {
@@ -148,7 +152,7 @@ func main() {
 		}
 		opts = append(opts, driver.WithFilter(prg))
 	}
-	dranet, err := driver.Start(ctx, driverName, clientset, nodeName, opts...)
+	dranet, err := driver.Start(ctx, driverName, clientset, nodeName, &lock, dranetDataMap, opts...)
 	if err != nil {
 		klog.Fatalf("driver failed to start: %v", err)
 	}
@@ -156,7 +160,7 @@ func main() {
 	ready.Store(true)
 	klog.Info("driver started")
 
-	err = startPodNetworkController(ctx, config)
+	err = startPodNetworkController(ctx, config, &lock, dranetDataMap)
 	if err != nil {
 		klog.Fatalf("PodNetwork ctrl failed to start: %v", err)
 	}

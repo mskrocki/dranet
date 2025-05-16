@@ -2,11 +2,11 @@ package podnet
 
 import (
 	"context"
+	"encoding/json"
+	"sync"
 	"time"
 
 	"k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/api/meta"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/tools/cache"
@@ -25,17 +25,26 @@ const (
 	workqueueName = "podnetwork"
 )
 
+type DranetData struct {
+	Name string `json:"name,omitempty"`
+}
+
 type Controller struct {
 	podNetworkInformer        podnetworkinformer.PodNetworkInformer
 	podNetworkClientset       podnetworkclientset.Interface
 	queue                     workqueue.RateLimitingInterface
 	podNetworkInformerFactory podnetworkfactory.SharedInformerFactory
+
+	podNetworks map[string]*DranetData
+	lock        *sync.Mutex
 }
 
 func NewPodNetworkController(
 	podNetworkInformer podnetworkinformer.PodNetworkInformer,
 	podNetworkClientset podnetworkclientset.Interface,
 	podNetworkInformerFactory podnetworkfactory.SharedInformerFactory,
+	lock *sync.Mutex,
+	podNetworksMap map[string]*DranetData,
 ) *Controller {
 
 	c := &Controller{
@@ -43,6 +52,9 @@ func NewPodNetworkController(
 		podNetworkClientset:       podNetworkClientset,
 		podNetworkInformer:        podNetworkInformer,
 		queue:                     workqueue.NewRateLimitingQueueWithConfig(workqueue.DefaultControllerRateLimiter(), workqueue.RateLimitingQueueConfig{Name: workqueueName}),
+
+		lock:        lock,
+		podNetworks: podNetworksMap,
 	}
 
 	podNetworkInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
@@ -161,7 +173,7 @@ func removeFinalizerInPlace(network *v1alpha1.PodNetwork) {
 }
 
 func (c *Controller) reconcile(ctx context.Context, key string) error {
-	originalNetwork, err := c.podNetworkInformer.Lister().Get(key)
+	network, err := c.podNetworkInformer.Lister().Get(key)
 	if err != nil {
 		if errors.IsNotFound(err) {
 			return nil
@@ -170,17 +182,16 @@ func (c *Controller) reconcile(ctx context.Context, key string) error {
 		return err
 	}
 
-	network := originalNetwork.DeepCopy()
 	klog.Infof("reconciling %s", network.Name)
 
 	err = c.syncPodNetwork(ctx, network)
 
-	meta.SetStatusCondition(&network.Status.Conditions, metav1.Condition{
-		Type:               "Ready",
-		Status:             metav1.ConditionTrue,
-		Reason:             "Ready",
-		ObservedGeneration: network.Generation,
-	})
+	//meta.SetStatusCondition(&network.Status.Conditions, metav1.Condition{
+	//	Type:               "Ready",
+	//	Status:             metav1.ConditionTrue,
+	//	Reason:             "Ready",
+	//	ObservedGeneration: network.Generation,
+	//})
 
 	//if !reflect.DeepEqual(originalNetwork.ObjectMeta, network.ObjectMeta) {
 	//	if updateErr := c.updatePodNetwork(ctx, network); updateErr != nil {
@@ -204,11 +215,31 @@ func (c *Controller) syncPodNetwork(ctx context.Context, network *v1alpha1.PodNe
 		return c.handleDelete(ctx, network)
 	}
 
+	c.lock.Lock()
+	defer c.lock.Unlock()
+
+	data := &DranetData{}
+	if network.Spec.Parameters.Raw != nil {
+		err := json.Unmarshal(network.Spec.Parameters.Raw, data)
+		if err != nil {
+			klog.Errorf("failed to json.Unmarshal Parameters: %v", err)
+			return nil
+		}
+	}
+
+	klog.Infof("PodNetwork data: %v", data)
+	c.podNetworks[network.Name] = data
+
 	addFinalizerInPlace(network)
 	return nil
 }
 
 func (c *Controller) handleDelete(ctx context.Context, network *v1alpha1.PodNetwork) error {
+	c.lock.Lock()
+	defer c.lock.Unlock()
+
+	delete(c.podNetworks, network.Name)
+
 	removeFinalizerInPlace(network)
 	return nil
 }
