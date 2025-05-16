@@ -156,6 +156,11 @@ func main() {
 	ready.Store(true)
 	klog.Info("driver started")
 
+	err = startPodNetworkController(ctx, config)
+	if err != nil {
+		klog.Fatalf("PodNetwork ctrl failed to start: %v", err)
+	}
+
 	select {
 	case <-signalCh:
 		klog.Infof("Exiting: received signal")
