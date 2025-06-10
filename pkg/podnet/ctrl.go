@@ -29,22 +29,26 @@ type DranetData struct {
 	Name string `json:"name,omitempty"`
 }
 
+type PNShare struct {
+	PodNetworkTrigger chan bool
+	DranetData        map[string]*DranetData
+	Lock              *sync.Mutex
+}
+
 type Controller struct {
 	podNetworkInformer        podnetworkinformer.PodNetworkInformer
 	podNetworkClientset       podnetworkclientset.Interface
 	queue                     workqueue.RateLimitingInterface
 	podNetworkInformerFactory podnetworkfactory.SharedInformerFactory
 
-	podNetworks map[string]*DranetData
-	lock        *sync.Mutex
+	pnShare *PNShare
 }
 
 func NewPodNetworkController(
 	podNetworkInformer podnetworkinformer.PodNetworkInformer,
 	podNetworkClientset podnetworkclientset.Interface,
 	podNetworkInformerFactory podnetworkfactory.SharedInformerFactory,
-	lock *sync.Mutex,
-	podNetworksMap map[string]*DranetData,
+	pnShare *PNShare,
 ) *Controller {
 
 	c := &Controller{
@@ -52,9 +56,7 @@ func NewPodNetworkController(
 		podNetworkClientset:       podNetworkClientset,
 		podNetworkInformer:        podNetworkInformer,
 		queue:                     workqueue.NewRateLimitingQueueWithConfig(workqueue.DefaultControllerRateLimiter(), workqueue.RateLimitingQueueConfig{Name: workqueueName}),
-
-		lock:        lock,
-		podNetworks: podNetworksMap,
+		pnShare:                   pnShare,
 	}
 
 	podNetworkInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
@@ -149,29 +151,6 @@ func (c *Controller) handleErr(err error, key interface{}) {
 	controllermetrics.WorkqueueDroppedObjects.WithLabelValues(workqueueName).Inc()
 }
 
-func addFinalizerInPlace(network *v1alpha1.PodNetwork) {
-	finalizers := network.GetFinalizers()
-	for _, f := range finalizers {
-		if f == finalizer {
-			return
-		}
-	}
-
-	network.SetFinalizers(append(finalizers, finalizer))
-}
-
-func removeFinalizerInPlace(network *v1alpha1.PodNetwork) {
-	finalizers := network.GetFinalizers()
-	for i, f := range finalizers {
-		if f == finalizer {
-			finalizers = append(finalizers[:i], finalizers[i+1:]...)
-			break
-		}
-	}
-
-	network.SetFinalizers(finalizers)
-}
-
 func (c *Controller) reconcile(ctx context.Context, key string) error {
 	network, err := c.podNetworkInformer.Lister().Get(key)
 	if err != nil {
@@ -186,27 +165,10 @@ func (c *Controller) reconcile(ctx context.Context, key string) error {
 
 	err = c.syncPodNetwork(ctx, network)
 
-	//meta.SetStatusCondition(&network.Status.Conditions, metav1.Condition{
-	//	Type:               "Ready",
-	//	Status:             metav1.ConditionTrue,
-	//	Reason:             "Ready",
-	//	ObservedGeneration: network.Generation,
-	//})
-
-	//if !reflect.DeepEqual(originalNetwork.ObjectMeta, network.ObjectMeta) {
-	//	if updateErr := c.updatePodNetwork(ctx, network); updateErr != nil {
-	//		err = multierror.Append(updateErr, err)
-	//	}
-	//}
-	//if !reflect.DeepEqual(originalNetwork.Status, network.Status) {
-	//	if updateErr := c.updatePodNetworkStatus(ctx, network); updateErr != nil {
-	//		err = multierror.Append(updateErr, err)
-	//	}
-	//}
-
 	if err != nil {
 		return err
 	}
+	c.pnShare.PodNetworkTrigger <- true
 	return nil
 }
 
@@ -215,8 +177,8 @@ func (c *Controller) syncPodNetwork(ctx context.Context, network *v1alpha1.PodNe
 		return c.handleDelete(ctx, network)
 	}
 
-	c.lock.Lock()
-	defer c.lock.Unlock()
+	c.pnShare.Lock.Lock()
+	defer c.pnShare.Lock.Unlock()
 
 	data := &DranetData{}
 	if network.Spec.Parameters.Raw != nil {
@@ -228,34 +190,16 @@ func (c *Controller) syncPodNetwork(ctx context.Context, network *v1alpha1.PodNe
 	}
 
 	klog.Infof("PodNetwork data: %v", data)
-	c.podNetworks[network.Name] = data
+	c.pnShare.DranetData[network.Name] = data
 
-	addFinalizerInPlace(network)
 	return nil
 }
 
 func (c *Controller) handleDelete(ctx context.Context, network *v1alpha1.PodNetwork) error {
-	c.lock.Lock()
-	defer c.lock.Unlock()
+	c.pnShare.Lock.Lock()
+	defer c.pnShare.Lock.Unlock()
 
-	delete(c.podNetworks, network.Name)
+	delete(c.pnShare.DranetData, network.Name)
 
-	removeFinalizerInPlace(network)
 	return nil
 }
-
-//func (c *Controller) updatePodNetwork(ctx context.Context, network *v1alpha1.PodNetwork) error {
-//	_, err := c.podNetworkClientset.MultinetworkV1alpha1().PodNetworks().Update(ctx, network, metav1.UpdateOptions{})
-//	if err != nil {
-//		return fmt.Errorf("failed to update PodNetwork: %w", err)
-//	}
-//	return nil
-//}
-//
-//func (c *Controller) updatePodNetworkStatus(ctx context.Context, network *v1alpha1.PodNetwork) error {
-//	_, err := c.podNetworkClientset.MultinetworkV1alpha1().PodNetworks().UpdateStatus(ctx, network, metav1.UpdateOptions{})
-//	if err != nil {
-//		return fmt.Errorf("failed to update PodNetwork Status: %w", err)
-//	}
-//	return nil
-//}

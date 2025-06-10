@@ -90,8 +90,11 @@ func main() {
 
 	var config *rest.Config
 	var err error
-	var lock sync.Mutex
-	dranetDataMap := make(map[string]*podnet.DranetData, 0)
+	pnShare := &podnet.PNShare{
+		PodNetworkTrigger: make(chan bool),
+		DranetData:        make(map[string]*podnet.DranetData, 0),
+		Lock:              &sync.Mutex{},
+	}
 
 	if kubeconfig != "" {
 		config, err = clientcmd.BuildConfigFromFlags("", kubeconfig)
@@ -152,7 +155,7 @@ func main() {
 		}
 		opts = append(opts, driver.WithFilter(prg))
 	}
-	dranet, err := driver.Start(ctx, driverName, clientset, nodeName, &lock, dranetDataMap, opts...)
+	dranet, err := driver.Start(ctx, driverName, clientset, nodeName, pnShare, opts...)
 	if err != nil {
 		klog.Fatalf("driver failed to start: %v", err)
 	}
@@ -160,7 +163,7 @@ func main() {
 	ready.Store(true)
 	klog.Info("driver started")
 
-	err = startPodNetworkController(ctx, config, &lock, dranetDataMap)
+	err = startPodNetworkController(ctx, config, pnShare)
 	if err != nil {
 		klog.Fatalf("PodNetwork ctrl failed to start: %v", err)
 	}

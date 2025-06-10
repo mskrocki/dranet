@@ -59,8 +59,7 @@ type DB struct {
 	rateLimiter   *rate.Limiter
 	notifications chan []resourceapi.Device
 
-	podNetworks map[string]*podnet.DranetData
-	lock        *sync.Mutex
+	pnShare *podnet.PNShare
 }
 
 type Device struct {
@@ -68,14 +67,13 @@ type Device struct {
 	Name string
 }
 
-func New(lock *sync.Mutex, podNetworksMap map[string]*podnet.DranetData) *DB {
+func New(pnShare *podnet.PNShare) *DB {
 	return &DB{
 		rateLimiter:   rate.NewLimiter(rate.Every(minInterval), 1),
 		podStore:      map[int]string{},
 		notifications: make(chan []resourceapi.Device),
 
-		lock:        lock,
-		podNetworks: podNetworksMap,
+		pnShare: pnShare,
 	}
 }
 
@@ -195,6 +193,11 @@ func (db *DB) Run(ctx context.Context) error {
 			for len(nlChannel) > 0 {
 				<-nlChannel
 			}
+		case <-db.pnShare.PodNetworkTrigger:
+			// drain the channel so we only sync once
+			for len(db.pnShare.PodNetworkTrigger) > 0 {
+				<-db.pnShare.PodNetworkTrigger
+			}
 		case <-time.After(maxInterval):
 		case <-ctx.Done():
 			return ctx.Err()
@@ -230,9 +233,9 @@ func (db *DB) netdevToDRAdev(ifName string) (*resourceapi.Device, error) {
 	linkType := link.Type()
 	linkAttrs := link.Attrs()
 
-	db.lock.Lock()
-	defer db.lock.Unlock()
-	for k, v := range db.podNetworks {
+	db.pnShare.Lock.Lock()
+	defer db.pnShare.Lock.Unlock()
+	for k, v := range db.pnShare.DranetData {
 		if v.Name == ifName {
 			device.Basic.Attributes["dra.net/podNetwork"] = resourceapi.DeviceAttribute{StringValue: &k}
 			break

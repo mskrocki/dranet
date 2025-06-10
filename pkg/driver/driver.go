@@ -23,7 +23,6 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
-	"sync"
 	"time"
 
 	"github.com/Mellanox/rdmamap"
@@ -102,7 +101,7 @@ type NetworkDriver struct {
 
 type Option func(*NetworkDriver)
 
-func Start(ctx context.Context, driverName string, kubeClient kubernetes.Interface, nodeName string, lock *sync.Mutex, podNetworks map[string]*podnet.DranetData, opts ...Option) (*NetworkDriver, error) {
+func Start(ctx context.Context, driverName string, kubeClient kubernetes.Interface, nodeName string, pnShare *podnet.PNShare, opts ...Option) (*NetworkDriver, error) {
 	store := cache.NewIndexer(cache.MetaNamespaceKeyFunc,
 		cache.Indexers{
 			cache.NamespaceIndex: cache.MetaNamespaceIndexFunc,
@@ -172,7 +171,7 @@ func Start(ctx context.Context, driverName string, kubeClient kubernetes.Interfa
 	}()
 
 	// register the host network interfaces
-	plugin.netdb = inventory.New(lock, podNetworks)
+	plugin.netdb = inventory.New(pnShare)
 	go func() {
 		err = plugin.netdb.Run(ctx)
 		if err != nil {
@@ -401,6 +400,7 @@ func (np *NetworkDriver) PublishResources(ctx context.Context) {
 }
 
 func (np *NetworkDriver) updateLocalDB(devices []resourcev1beta1.Device) {
+	np.localdb = map[string]resourcev1beta1.Device{}
 	for _, device := range devices {
 		np.localdb[device.Name] = device
 	}
