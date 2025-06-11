@@ -7,22 +7,23 @@ import (
 	"time"
 
 	"k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/util/workqueue"
-	"sigs.k8s.io/multi-network-api/apis/v1alpha1"
-
 	"k8s.io/cloud-provider-gcp/pkg/controllermetrics"
 	"k8s.io/klog/v2"
+	"sigs.k8s.io/multi-network-api/apis/v1alpha1"
+
 	podnetworkclientset "sigs.k8s.io/multi-network-api/pkg/client/clientset/versioned"
 	podnetworkfactory "sigs.k8s.io/multi-network-api/pkg/client/informers/externalversions"
 	podnetworkinformer "sigs.k8s.io/multi-network-api/pkg/client/informers/externalversions/apis/v1alpha1"
 )
 
 const (
-	finalizer     = "k8s.io/mn-dranet"
 	workqueueName = "podnetwork"
+	provider      = "dra.net"
 )
 
 type DranetData struct {
@@ -163,6 +164,11 @@ func (c *Controller) reconcile(ctx context.Context, key string) error {
 
 	klog.Infof("reconciling %s", network.Name)
 
+	if network.Spec.Provider != provider {
+		klog.Info("PodNetwork from different provider. Ignoring.")
+		return nil
+	}
+
 	err = c.syncPodNetwork(ctx, network)
 
 	if err != nil {
@@ -173,12 +179,18 @@ func (c *Controller) reconcile(ctx context.Context, key string) error {
 }
 
 func (c *Controller) syncPodNetwork(ctx context.Context, network *v1alpha1.PodNetwork) error {
-	if network.DeletionTimestamp != nil {
-		return c.handleDelete(ctx, network)
-	}
-
 	c.pnShare.Lock.Lock()
 	defer c.pnShare.Lock.Unlock()
+
+	if network.DeletionTimestamp != nil {
+		delete(c.pnShare.DranetData, network.Name)
+		return nil
+	}
+
+	if !meta.IsStatusConditionTrue(network.Status.Conditions, "Ready") {
+		delete(c.pnShare.DranetData, network.Name)
+		return nil
+	}
 
 	data := &DranetData{}
 	if network.Spec.Parameters.Raw != nil {
@@ -191,15 +203,6 @@ func (c *Controller) syncPodNetwork(ctx context.Context, network *v1alpha1.PodNe
 
 	klog.Infof("PodNetwork data: %v", data)
 	c.pnShare.DranetData[network.Name] = data
-
-	return nil
-}
-
-func (c *Controller) handleDelete(ctx context.Context, network *v1alpha1.PodNetwork) error {
-	c.pnShare.Lock.Lock()
-	defer c.pnShare.Lock.Unlock()
-
-	delete(c.pnShare.DranetData, network.Name)
 
 	return nil
 }
